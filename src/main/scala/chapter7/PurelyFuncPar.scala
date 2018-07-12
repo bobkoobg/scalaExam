@@ -34,12 +34,15 @@ object c7 {
 
     private case class UnitFuture[A](get: A) extends Future[A] {
       def isDone = true
+
       def get(timeout: Long, units: TimeUnit) = get
+
       def isCancelled = false
+
       def cancel(evenIfRunning: Boolean): Boolean = false
     }
 
-    def map2[A,B,C](a: Par[A], b: Par[B])(f: (A,B) => C): Par[C] = {
+    def map2[A, B, C](a: Par[A], b: Par[B])(f: (A, B) => C): Par[C] = {
       // `map2` doesn't evaluate the call to `f` in a separate logical thread,
       // in accord with our design choice of having `fork` be the sole function in the API
       // for controlling parallelism.
@@ -79,13 +82,16 @@ object c7 {
         })
     }
 
-    def map[A,B](pa: Par[A])(f: A => B): Par[B] = {
+    def map[A, B](pa: Par[A])(f: A => B): Par[B] = {
       map2(pa, unit(()))((a, _) => f(a))
     }
 
     def sortPar(parList: Par[List[Int]]) = {
       map(parList)(_.sorted)
     }
+
+    def sortPar2(parList: Par[List[Int]]): Par[List[Int]] =
+      map2(parList, unit(()))((a, _) => a.sorted)
 
     def equal[A](e: ExecutorService)(p: Par[A], p2: Par[A]): Boolean = {
       p(e).get == p2(e).get
@@ -108,6 +114,7 @@ object c7 {
 
 
     }
+
   }
 
   import Par._
@@ -134,20 +141,166 @@ object c7 {
   def lazyUnit[A](a: => A): Par[A] =
     fork(unit(a))
 
-  def asyncF[A, B]( f: A => B): A => Par[B] = {
-    (a: A) => lazyUnit( f(a) )
+  def asyncF[A, B](f: A => B): A => Par[B] = {
+    (a: A) => lazyUnit(f(a))
   }
 
   //ex7_5
-//  def sequence[A](ps: List[Par[A]]): Par[List[A]] = {
+  // Not working
+  def sequence[A](ps: List[Par[A]]): Par[List[A]] = {
+    def loop[A](l: List[Par[A]]): Par[List[A]] = l match {
+      case Nil => unit(Nil)
+      case h :: t => map2(h, fork(loop(t)))((a: A, b: List[A]) => a :: b)
+    }
+
+    loop(ps)
+  }
+
+  def sequence_simple[A](l: List[Par[A]]): Par[List[A]] =
+    l.foldRight[Par[List[A]]](unit(List()))((h, t) => map2(h, t)((a: A, b: List[A]) => a :: b))
+
+  def parMap[A,B]( ps: List[A] )( f: A => B ) : Par[ List[B] ] = fork {
+    val fbs: List[Par[B]] = ps.map( asyncF(f) ) //create Par object of each A and push it towards the sequence
+
+    sequence_simple(fbs)
+  }
+
+  //ex7_6
+  def sum(ints: List[Int]): Int = ints match {
+    case Nil => 0
+    case x :: tail => x + sum(tail)
+  }
+
+  def parFilter[A](as: List[A])(f: A => Boolean): Par[List[A]] = {
+
+    def loop(as: List[A]): List[A] = as match {
+      case Nil => Nil
+      case h :: t => if (f(h)) h :: loop(t) else t
+    }
+
+    unit(loop(as))
+  }
+
+  //7.7 - What do they want from me ?
+  //7.8 - blahblahblah
+  //7.9 - blahblahblah
+  //7.10 - blahblahblah
+
+  //7.11
+
+  def choice[A](cond: Par[Boolean])(t: Par[A], f: Par[A]): Par[A] = {
+    es =>
+      if (run(es)(cond).get) t(es)
+      else f(es)
+  }
+
+  def choiceN[A]( n: Par[Int] )( choices: List[ Par[A] ] ): Par[A] = {
+    es => {
+      //you pass executorservice to the run. Then you pass the item. What will happen is that
+      //the executorservice will be applied to the item and then you can call .get on it cause
+      //we will be working with our Future object at that point
+
+      val ind = run(es)(n).get // get the "index" that is called "N"
+      run(es)(choices(ind)) //use that index to get an item from the choices list
+
+      //my wrong idea:
+//      def loop( cc: List[Par[A] ] ): Par[A] = cc match {
+//        case Nil => Nil
+//        case x => if (run(es)(cond).get)t
+//      }
 //
-//  }
+//      loop( choices )
+    }
+  }
+
+  def choiceInTermsOfChoiceN[A](cond: Par[Boolean])(t: Par[A], f: Par[A]): Par[A] = {
+//    es => {
+      val n = map( cond )( (x: Boolean) => if (x) 0 else 1)
+//      val n = unit( if( run(es)(cond).get ) 0 else 1 )
+      choiceN( n )( List(t, f) )
+//    }
+  }
+
+  //7_12
+  def choiceMap[K,V](key: Par[K])( choices: Map[K,Par[V]] ): Par[V] = {
+//    val n = map( key )( (x: K) => x)
+//    choices( n )
+
+    es => {
+      val n = run(es)(key).get
+      run(es)(choices(n))
+    }
+  }
+
+  def chooser[A,B](pa: Par[A])(choices: A => Par[B]): Par[B] = {
+    es => {
+      val n = run(es)(pa).get
+      run(es)(choices(n))
+    }
+  }
+
+  //7_14
+  def join[A]( a: Par[ Par[A] ] ): Par[A] = {
+    es => {
+      val k = run(es)(a).get
+      k(es)
+    }
+  }
+
+  def flatMap[A,B]( a: Par[A] )( f: A => Par[B] ): Par[B] = {
+    es => {
+      val k = run(es)(a).get
+      f(k)(es)
+    }
+  }
+
+
 
   val es: ExecutorService = Executors.newFixedThreadPool(2)
   val list = 1 :: 2 :: 3 :: 4 :: 5 :: 6 :: 7 :: 8 :: Nil
   val sumExample = sum( IndexedSeq(1,2,3) )
-
   val ex7_4 = asyncF( (x: Int) => x+1 )(5)( es ).get
+  val ex7_4_2 = asyncF( (x: Int) => x+2 )(6)( es ).get
+  val parList1 = List( unit( 1 ), unit( 2 ) )
+  val parList2 = List( unit( 3 ), unit( "Bob" ) )
 
+//  val ex7_4_1 = fork( asyncF( (x: Int) => x+1 )(5) )( es ).get
+  var ex7_5 = sequence_simple( parList1 )( es ).get
+  var ex7_6 = parFilter( list )( (x: Int) => x > 3 )
+  var ex7_6_1 = parFilter( list )( (x: Int) => x > 3 )( es ).get
+
+  import java.util.concurrent.Executors
+  val p = parMap(List.range(1, 100000))(math.sqrt(_))
+  val x = run(Executors.newFixedThreadPool(2))(p)
+
+  val ex_11_t_1 = choice( unit(true) )( unit(1), unit(2) )( es ).get
+  val ex_11_t_2 = choice( unit(false) )( unit(1), unit(2) )( es ).get
+
+  var ex_11_1 = choiceN( unit(4) )( List( unit(1),unit(2),unit(3),unit(4),unit(5555) ) )( es ).get
+
+  val ex_11_2_1 = choiceInTermsOfChoiceN( unit(true) )( unit(1), unit(2) )( es ).get
+  val ex_11_2_2 = choiceInTermsOfChoiceN( unit(false) )( unit(1), unit(2) )( es ).get
+
+  val ex_12_1 = choiceMap( unit(2) )( Map( 0 -> unit(5), 1 -> unit(34), 2 -> unit(111), 3 -> unit(934) ) )( es ).get
+  val ex_12_2 = chooser( unit(1) )( Map( 0 -> unit(5), 1 -> unit(34), 2 -> unit(111), 3 -> unit(934) ) )( es ).get
+
+  //ex7_13
+  //def choice[A](cond: Par[Boolean])(t: Par[A], f: Par[A]): Par[A] = {
+  val ex_13_choice_1 = chooser( unit(1) )( (x: Int) => if(x>1) unit(5) else unit(3) )( es ).get
+  val ex_13_choice_2 = chooser( unit(4) )( (x: Int) => if(x>1) unit(5) else unit(3) )( es ).get
+  //def choiceN[A]( n: Par[Int] )( choices: List[ Par[A] ] ): Par[A] = {
+  val ex_13_choiceN_1 = chooser( unit(1) )( (x: Int) => {
+    val l = List( unit(1),unit(2),unit(3),unit(4),unit(5555) )
+    l(x)
+  } )( es ).get
+
+  //7_14
+  val ex_14_1 = join( unit( unit(5) ) )( es ).get
+  val ex_14_2 = flatMap( unit(5) )( (x: Int) => unit(x+5) )( es ).get
+
+  //idk...
+  val ex_14_1_flatMap = join( unit( unit(5) ) )( es ).get + join( unit( unit(5) ) )( es ).get
+
+  //done ^^
 }
 
